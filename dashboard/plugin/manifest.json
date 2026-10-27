@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "frame.dashboard",
+  "name": "Home dashboard",
+  "version": "0.2.0",
+  "author": "framarchy",
+  "description": "Home screen pages on Hyprland workspaces (today, home, car, devices) and a labelled workspace strip for the bar",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": { "service": "Dashboard.qml", "barWidget": "SpacesWidget.qml" },
+  "barWidget": {
+    "displayName": "Dashboard spaces",
+    "description": "Workspaces labelled with their dashboard page",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}

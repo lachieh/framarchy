@@ -1,0 +1,12 @@
+{
+  "location": { "name": "Atlanta", "latitude": 33.75, "longitude": -84.39 },
+  "units": "us",
+  "clock": "12h",
+  "clocks": [{ "label": "Sydney", "zone": "Australia/Sydney" }],
+  "homeAssistant": {
+    "url": "http://homeassistant.local:8123",
+    "token": "",
+    "todo": "todo.shopping_list"
+  },
+  "night": { "start": "21:00", "end": "06:30", "brightness": 10, "dayBrightness": 78 }
+}
