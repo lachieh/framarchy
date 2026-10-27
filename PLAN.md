@@ -132,5 +132,4 @@ Each stage ends in a check that has passed on the real frame.
   systemd-timesyncd never sent a packet. `rootfs/usb0.network` now sets
   `RequiredForOnline=no`; applied on the frame, synced, timezone set to
   America/New_York. Home dashboard prototype deployed as the `frame.dashboard`
-  shell plugin (worktree branch `t3/cc62c58b`, `dashboard/` and
-  `docs/dashboard.md`).
+  shell plugin (`dashboard/` and [docs/dashboard.md](docs/dashboard.md)).
