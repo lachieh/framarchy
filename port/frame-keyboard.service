@@ -1,0 +1,12 @@
+[Unit]
+Description=FRAME157 touch keyboard
+
+[Service]
+Type=dbus
+BusName=sm.puri.OSK0
+ExecStart=/usr/bin/squeekboard
+Environment=LANG=C.UTF-8
+# The SVG loader sandbox stalls on this frame when loading keyboard icons.
+Environment=GLYCIN_DISABLE_SANDBOX=i-know-the-risks
+Restart=on-failure
+RestartSec=2

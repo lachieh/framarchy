@@ -1,0 +1,3 @@
+# FRAME157: root on the SD card's second partition, boot files on the first.
+LABEL=FRAME157ROOT  /      ext4  rw,noatime,x-systemd.growfs  0 1
+LABEL=FRAME157      /boot  vfat  noauto,nofail,noatime    0 2

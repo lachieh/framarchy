@@ -1,0 +1,180 @@
+#!/bin/sh
+# FRAME157 initramfs.
+#
+# With root= on the command line: mount the SD card's FAT partition, keep a
+# boot log there (FRAME157 /logs, readable from stock Android after any reboot
+# or power cut), mount the root partition and switch_root into it.
+# Without root=, or if the root cannot be mounted: USB ACM debug shell.
+
+fat=/fat
+log=
+
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+note()
+{
+	echo "FRAME157: $*" > /dev/kmsg
+}
+
+save_log()
+{
+	[ -n "$log" ] || return 0
+	dmesg > "$log" 2>&1
+	sync
+}
+
+# Wait for a block device to appear (the SD card probes asynchronously).
+wait_dev()
+{
+	tries=0
+	while [ ! -b "$1" ] && [ "$tries" -lt 100 ]; do
+		tries=$((tries + 1))
+		sleep 0.1
+	done
+	[ -b "$1" ]
+}
+
+cmdline_root()
+{
+	for arg in $(cat /proc/cmdline); do
+		case $arg in root=*) echo "${arg#root=}" ;; esac
+	done
+}
+
+# Boot log on the FAT partition (partition 1 of the SD card).
+if wait_dev /dev/mmcblk0p1; then
+	mkdir -p $fat
+	if mount -t vfat -o rw,noatime /dev/mmcblk0p1 $fat; then
+		mkdir -p $fat/logs
+		n=$(cat $fat/logs/count 2>/dev/null || echo 0)
+		n=$((n + 1))
+		echo $n > $fat/logs/count
+		log=$fat/logs/boot-$n.txt
+		note "boot log $log"
+	fi
+fi
+
+# Storage read test (frame157.sdtest on the command line): 1 GiB from the SD
+# root partition and 500 MiB from the eMMC (read only), with timing.
+if grep -q frame157.sdtest /proc/cmdline && [ -n "$log" ]; then
+	{
+		for b in /sys/block/mmcblk*; do
+			echo "$b type=$(cat $b/device/type 2>/dev/null) size=$(cat $b/size)"
+		done
+		echo "== sd start $(cat /proc/uptime)"
+		dd if=/dev/mmcblk0p2 of=/dev/null bs=1048576 count=1024 2>&1
+		echo "== sd done $(cat /proc/uptime)"
+		sync
+		wait_dev /dev/mmcblk1 && {
+			echo "== emmc start $(cat /proc/uptime)"
+			dd if=/dev/mmcblk1 of=/dev/null bs=1048576 count=500 2>&1
+			echo "== emmc done $(cat /proc/uptime)"
+		}
+	} > $fat/logs/sdtest.txt 2>&1
+	save_log
+fi
+
+# Crash capture. A warm reboot keeps the previous boot's console in pstore RAM.
+# If that boot was ours and did not end with "reboot: Restarting system"
+# (panic, hang + reset), save it to the FAT partition before booting on.
+mkdir -p /sys/fs/pstore
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+if [ -n "$log" ] && [ -e /sys/fs/pstore/console-ramoops-0 ] &&
+    grep -q 'Linux version 6' /sys/fs/pstore/console-ramoops-0 &&
+    ! grep -q 'reboot: Restarting system' /sys/fs/pstore/console-ramoops-0; then
+	cp /sys/fs/pstore/console-ramoops-0 $log.previous-console.txt
+	cp /sys/fs/pstore/dmesg-ramoops-0 $log.previous-panic.txt 2>/dev/null
+	note "previous boot did not end cleanly; its log is in $log.previous-*"
+fi
+umount /sys/fs/pstore 2>/dev/null
+
+root=$(cmdline_root)
+if [ -n "$root" ]; then
+	case $root in
+	PARTUUID=*15715700-02) dev=/dev/mmcblk0p2 ;;
+	/dev/*) dev=$root ;;
+	*) dev=/dev/mmcblk0p2 ;;
+	esac
+	mkdir -p /newroot
+	if wait_dev "$dev" && mount -t ext4 -o rw,noatime "$dev" /newroot \
+	    && { [ -x /newroot/sbin/init ] || [ -L /newroot/sbin/init ]; }; then
+		note "root $dev mounted, switching to /sbin/init"
+		# Keep logging across switch_root for 3 minutes. switch_root
+		# deletes the initramfs, so the logger runs a copy of busybox
+		# from the FAT partition (which stays mounted in its own,
+		# old root) and reads the kernel log, where systemd also logs
+		# (systemd.log_target=kmsg).
+		if [ -n "$log" ]; then
+			save_log
+			cp /bin/busybox $fat/logs/busybox
+			# Sanity check that the new root's binaries run here.
+			{
+				echo "== chroot checks"
+				chroot /newroot /usr/bin/uname -a
+				chroot /newroot /usr/lib/systemd/systemd --version
+				echo "rc=$?"
+				ls -l /newroot/sbin/init
+			} > $fat/logs/chroot-check.txt 2>&1
+			sync
+			$fat/logs/busybox setsid $fat/logs/busybox sh -c "
+				cd $fat/logs
+				i=0
+				while [ \$i -lt 90 ]; do
+					./busybox dmesg > $log.tmp 2>&1
+					./busybox mv $log.tmp $log
+					./busybox sync
+					./busybox sleep 2
+					i=\$((i + 1))
+				done" > /dev/null 2>&1 &
+		fi
+		umount /proc /sys
+		mount --move /dev /newroot/dev 2>/dev/null || umount /dev
+		exec switch_root /newroot /sbin/init
+	fi
+	note "could not mount root $root ($dev); debug shell"
+	save_log
+fi
+
+# Debug shell on the USB ACM console.
+fail()
+{
+	note "FRAME157_FIRSTBOOT_ERROR stage=$1"
+	save_log
+	while :; do sleep 3600; done
+}
+
+mount -t configfs configfs /sys/kernel/config || fail mount-configfs
+set -- /sys/class/udc/*
+[ "$1" != "/sys/class/udc/*" ] || fail no-udc
+udc=${1##*/}
+gadget=/sys/kernel/config/usb_gadget/frame157
+mkdir "$gadget" && cd "$gadget" || fail gadget
+echo 0x2211 > idVendor
+echo 0x0012 > idProduct
+mkdir strings/0x409
+echo rockchip > strings/0x409/manufacturer
+echo "FRAME157 first boot" > strings/0x409/product
+echo FRAME157-FIRSTBOOT > strings/0x409/serialnumber
+mkdir -p configs/c.1/strings/0x409 functions/acm.usb0
+echo "FRAME157 ACM console" > configs/c.1/strings/0x409/configuration
+ln -s functions/acm.usb0 configs/c.1/acm.usb0
+echo "$udc" > UDC || fail udc-bind
+tries=0
+while [ ! -c /dev/ttyGS0 ] && [ "$tries" -lt 50 ]; do
+	tries=$((tries + 1))
+	sleep 0.1
+done
+[ -c /dev/ttyGS0 ] || fail no-ttygs0
+note "FRAME157_FIRSTBOOT_OK kernel=$(uname -r)"
+save_log
+export HOME=/root PATH=/bin PS1='frame157:/# '
+cd /
+# PID 1 must never exit. setsid -c gives the shell ttyGS0 as its controlling
+# terminal; the subshell is needed because PID 1 is a session leader.
+while :; do
+	(exec setsid -c sh -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1)
+	save_log
+	sleep 1
+done

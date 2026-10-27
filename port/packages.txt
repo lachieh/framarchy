@@ -1,0 +1,22 @@
+# Arch Linux ARM aarch64 packages for Omarchy on FRAME157 (research/02 §4.2).
+# compositor + shell
+hyprland hyprland-guiutils xdg-desktop-portal-hyprland xdg-desktop-portal-gtk
+quickshell qt6-base qt6-declarative qt6-wayland qt6-svg qt6-imageformats
+uwsm xdg-terminal-exec foot
+# GPU (Panfrost, GLES 3.1)
+mesa
+# used by omarchy-* helpers
+gum jq git perl python python-gobject socat inotify-tools less unzip libnotify
+wl-clipboard wtype grim slurp brightnessctl xdg-user-dirs
+# session services
+pipewire wireplumber pipewire-pulse rtkit networkmanager gnome-keyring libsecret polkit seatd
+# fonts / icons
+ttf-jetbrains-mono-nerd noto-fonts noto-fonts-emoji woff2-font-awesome adwaita-icon-theme
+# touch
+squeekboard
+# memory
+zram-generator earlyoom
+# light apps
+imv mpv yt-dlp btop fastfetch nano
+# calibration (remove once touch is mapped)
+evtest wev

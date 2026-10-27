@@ -1,0 +1,16 @@
+diff --git a/Documentation/devicetree/bindings/arm/rockchip.yaml b/Documentation/devicetree/bindings/arm/rockchip.yaml
+index 44b6480eeb1c..2cffcb40ec03 100644
+--- a/Documentation/devicetree/bindings/arm/rockchip.yaml
++++ b/Documentation/devicetree/bindings/arm/rockchip.yaml
+@@ -37,6 +37,11 @@ properties:
+               - anbernic,rg351v
+           - const: rockchip,rk3326
+ 
++      - description: Rockchip RK3326 AI Voice Assistant EVB V11
++        items:
++          - const: rockchip,rk3326-evb-ai-va-v11
++          - const: rockchip,rk3326
++
+       - description: Anbernic RK3566 Handheld Gaming Console
+         items:
+           - enum:

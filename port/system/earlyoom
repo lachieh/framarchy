@@ -1,0 +1,1 @@
+EARLYOOM_ARGS="-m 5 -s 10 --prefer (chromium|firefox|mpv) --avoid (Hyprland|quickshell|systemd)"

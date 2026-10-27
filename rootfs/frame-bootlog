@@ -1,0 +1,17 @@
+#!/bin/sh
+# Copy this boot's kernel log and journal to the SD card's FAT partition every
+# 10 s for 5 minutes, then every minute, so it can be read from stock Android
+# after any reboot or power cut. Files: FRAME157 /logs/linux-*.txt
+mkdir -p /run/fat
+mount -t vfat -o rw,noatime /dev/disk/by-label/FRAME157 /run/fat || exit 0
+mkdir -p /run/fat/logs
+n=$(cat /run/fat/logs/count 2>/dev/null || echo 0)
+i=0
+while :; do
+	dmesg > /run/fat/logs/linux-$n-dmesg.txt 2>&1
+	journalctl -b --no-pager > /run/fat/logs/linux-$n-journal.txt 2>&1
+	systemctl --failed --no-pager > /run/fat/logs/linux-$n-failed.txt 2>&1
+	sync
+	i=$((i + 1))
+	if [ $i -lt 30 ]; then sleep 10; else sleep 60; fi
+done

@@ -1,0 +1,13 @@
+[Unit]
+Description=FRAME157 USB console and network gadget
+DefaultDependencies=no
+After=sys-kernel-config.mount
+Before=serial-getty@ttyGS0.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/frame-usb-gadget
+
+[Install]
+WantedBy=sysinit.target

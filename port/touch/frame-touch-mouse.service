@@ -1,0 +1,11 @@
+[Unit]
+Description=FRAME157 touchscreen mouse mode
+After=systemd-udev-trigger.service
+
+[Service]
+ExecStartPre=/usr/sbin/modprobe uinput
+ExecStart=/usr/local/bin/frame-touch-mouse /dev/input/by-path/platform-ff190000.i2c-event
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

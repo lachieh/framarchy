@@ -1,0 +1,5 @@
+backup/
+build/
+vendor/
+log/
+__pycache__/

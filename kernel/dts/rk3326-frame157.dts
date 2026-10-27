@@ -1,0 +1,501 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include "rk3326.dtsi"
+
+/ {
+	model = "FRAME157 (C-Link CL-RK3326-DP105F)";
+	compatible = "rockchip,rk3326-evb-ai-va-v11", "rockchip,rk3326";
+
+	aliases {
+		mmc0 = &sdmmc;
+		mmc1 = &emmc;
+	};
+
+	/* Same region and zone sizes as the stock DT, so stock Android can read
+	 * this kernel's console log from /sys/fs/pstore after a warm reboot.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * Secure-world RAM used by the stock TF-A/OP-TEE (trust partition).
+		 * Stock U-Boot leaves 0x08400000-0x0a200000 out of the memory
+		 * node; mainline U-Boot reports all RAM, so it must be reserved
+		 * here. Using it gives bus errors (systemd "Caught <BUS>"), SD
+		 * DMA "I/O errors" and hard hangs (2026-10-16 boot logs).
+		 */
+		secure-memory@8400000 {
+			reg = <0x0 0x08400000 0x0 0x01e00000>;
+			no-map;
+		};
+
+		ramoops@110000 {
+			compatible = "ramoops";
+			reg = <0x0 0x110000 0x0 0xf0000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x50000>;
+		};
+	};
+
+	/* Values from the stock DT backlight node: PWM1 at 1 kHz, enable GPIO3_C0. */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm1 0 1000000 0>;
+		enable-gpios = <&gpio3 RK_PC0 GPIO_ACTIVE_HIGH>;
+		brightness-levels = <0 255>;
+		num-interpolated-steps = <255>;
+		default-brightness-level = <200>;
+	};
+
+	/*
+	 * 15.6" 1920x1080 eDP panel behind the LT8911EXB. Timing is what the
+	 * stock vendor driver programs into the bridge (lontium,* properties in
+	 * the stock DT): 128 MHz, 2230x1140 total, 50.3 Hz.
+	 */
+	panel: panel {
+		compatible = "panel-dpi";
+		power-supply = <&vcc3v3_lcd>;
+		enable-gpios = <&gpio3 RK_PC4 GPIO_ACTIVE_HIGH>;
+		backlight = <&backlight>;
+		width-mm = <344>;
+		height-mm = <194>;
+
+		panel-timing {
+			clock-frequency = <128000000>;
+			hactive = <1920>;
+			vactive = <1080>;
+			hfront-porch = <140>;
+			hback-porch = <138>;
+			hsync-len = <32>;
+			vfront-porch = <20>;
+			vback-porch = <34>;
+			vsync-len = <6>;
+			hsync-active = <0>;
+			vsync-active = <0>;
+			de-active = <1>;
+			pixelclk-active = <0>;
+		};
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&bridge_out>;
+			};
+		};
+	};
+
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&rk809 1>;
+		clock-names = "ext_clock";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_enable_h>;
+		post-power-on-delay-ms = <100>;
+		/* GPIO0_A1 is the RK915 power enable, active high. */
+		reset-gpios = <&gpio0 RK_PA1 GPIO_ACTIVE_LOW>;
+	};
+
+	vcc5v0_sys: regulator-vcc5v0-sys {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc5v0_sys";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+	};
+};
+
+&cpu0 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu1 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu2 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu3 {
+	cpu-supply = <&vdd_arm>;
+};
+
+/* Internal 32 GB eMMC (stock Android). Enabled for read tests only so far. */
+&emmc {
+	bus-width = <8>;
+	cap-mmc-highspeed;
+	max-frequency = <52000000>;
+	non-removable;
+	status = "disabled";
+};
+
+&i2c0 {
+	clock-frequency = <400000>;
+	i2c-scl-rising-time-ns = <280>;
+	i2c-scl-falling-time-ns = <16>;
+	status = "okay";
+
+	rk809: pmic@20 {
+		compatible = "rockchip,rk809";
+		reg = <0x20>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PB2 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pmic_int>;
+		#clock-cells = <1>;
+		clock-output-names = "rk808-clkout1", "rk808-clkout2";
+
+		vcc1-supply = <&vcc5v0_sys>;
+		vcc2-supply = <&vcc5v0_sys>;
+		vcc3-supply = <&vcc5v0_sys>;
+		vcc4-supply = <&vcc5v0_sys>;
+		vcc5-supply = <&vcc3v3_sys>;
+		vcc6-supply = <&vcc3v3_sys>;
+		vcc7-supply = <&vcc3v3_sys>;
+		vcc8-supply = <&vcc3v3_sys>;
+		vcc9-supply = <&vcc5v0_sys>;
+
+		regulators {
+			vdd_logic: DCDC_REG1 {
+				regulator-name = "vdd_logic";
+				regulator-min-microvolt = <850000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vdd_arm: DCDC_REG2 {
+				regulator-name = "vdd_arm";
+				regulator-min-microvolt = <850000>;
+				regulator-max-microvolt = <1350000>;
+				regulator-ramp-delay = <6001>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_ddr: DCDC_REG3 {
+				regulator-name = "vcc_ddr";
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_3v0: DCDC_REG4 {
+				regulator-name = "vcc_3v0";
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc3v3_sys: DCDC_REG5 {
+				regulator-name = "vcc3v3_sys";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_1v0: LDO_REG1 {
+				regulator-name = "vcc_1v0";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <1000000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc1v8_soc: LDO_REG2 {
+				regulator-name = "vcc1v8_soc";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc1v0_soc: LDO_REG3 {
+				regulator-name = "vcc1v0_soc";
+				regulator-min-microvolt = <1000000>;
+				regulator-max-microvolt = <1000000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc3v0_pmu: LDO_REG4 {
+				regulator-name = "vcc3v0_pmu";
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vccio_sd: LDO_REG5 {
+				regulator-name = "vccio_sd";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc_sd: LDO_REG6 {
+				regulator-name = "vcc_sd";
+				regulator-min-microvolt = <3300000>;
+				regulator-max-microvolt = <3300000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc2v8_dvp: LDO_REG7 {
+				regulator-name = "vcc2v8_dvp";
+				regulator-min-microvolt = <2800000>;
+				regulator-max-microvolt = <2800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc1v8_dvp: LDO_REG8 {
+				regulator-name = "vcc1v8_dvp";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			lcd_vio: LDO_REG9 {
+				regulator-name = "lcd_vio";
+				regulator-min-microvolt = <1850000>;
+				regulator-max-microvolt = <1850000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			vcc5v0_host: SWITCH_REG1 {
+				regulator-name = "vcc5v0_host";
+			};
+
+			vcc3v3_lcd: SWITCH_REG2 {
+				regulator-name = "vcc3v3_lcd";
+				regulator-boot-on;
+			};
+		};
+	};
+};
+
+&io_domains {
+	vccio1-supply = <&vcc_3v0>;
+	vccio2-supply = <&vccio_sd>;
+	vccio3-supply = <&vcc1v8_dvp>;
+	vccio4-supply = <&vcc_3v0>;
+	vccio5-supply = <&vcc_3v0>;
+	status = "okay";
+};
+
+&pinctrl {
+	sdio-pwrseq {
+		wifi_enable_h: wifi-enable-h {
+			rockchip,pins = <0 RK_PA1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		wifi_host_wake_l: wifi-host-wake-l {
+			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+
+	pmic {
+		pmic_int: pmic-int {
+			rockchip,pins = <0 RK_PB2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+};
+
+&pmu_io_domains {
+	pmuio1-supply = <&vcc3v0_pmu>;
+	pmuio2-supply = <&vcc3v0_pmu>;
+	status = "okay";
+};
+
+/* RK915 Wi-Fi (stock "wireless-wlan": poweren GPIO0_A1, host wake GPIO0_A5,
+ * 32 kHz from the RK809). Needs the out-of-tree rk915 driver.
+ */
+&sdio {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	bus-width = <4>;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	keep-power-in-suspend;
+	max-frequency = <50000000>;
+	mmc-pwrseq = <&sdio_pwrseq>;
+	no-mmc;
+	no-sd;
+	non-removable;
+	status = "okay";
+
+	wifi@1 {
+		compatible = "rockchip,rk915";
+		reg = <1>;
+		interrupt-names = "host-wake";
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PA5 IRQ_TYPE_LEVEL_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wifi_host_wake_l>;
+	};
+};
+
+&sdmmc {
+	/* The old 64 GB card gave read errors under Linux at 50, 25 and
+	 * 12.5 MHz (2026-10-16); 25 MHz default speed with a new card.
+	 */
+	max-frequency = <25000000>;
+	no-sdio;
+	vmmc-supply = <&vcc_sd>;
+	vqmmc-supply = <&vccio_sd>;
+	status = "okay";
+};
+
+&u2phy {
+	status = "okay";
+};
+
+&u2phy_otg {
+	status = "okay";
+};
+
+&usb20_otg {
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+&display_subsystem {
+	status = "okay";
+};
+
+&dsi {
+	status = "okay";
+
+	ports {
+		dsi_out: port@1 {
+			reg = <1>;
+
+			dsi_out_bridge: endpoint {
+				remote-endpoint = <&bridge_in>;
+			};
+		};
+	};
+};
+
+&dsi_dphy {
+	status = "okay";
+};
+
+&gpu {
+	mali-supply = <&vdd_logic>;
+	status = "okay";
+};
+
+/* Lontium LT8911EXB DSI-to-eDP bridge, as in the stock DT (i2c2 at 100 kHz). */
+&i2c2 {
+	clock-frequency = <100000>;
+	status = "okay";
+
+	bridge@29 {
+		compatible = "lontium,lt8911exb";
+		reg = <0x29>;
+		reset-gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
+		vdd-supply = <&lcd_vio>;
+		lontium,edp-lanes = <2>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+
+				bridge_in: endpoint {
+					remote-endpoint = <&dsi_out_bridge>;
+					data-lanes = <1 2 3 4>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+
+				bridge_out: endpoint {
+					remote-endpoint = <&panel_in>;
+				};
+			};
+		};
+	};
+};
+
+&pwm1 {
+	status = "okay";
+};
+
+/* USB-A host port (keyboard, Wi-Fi dongle). */
+&u2phy_host {
+	phy-supply = <&vcc5v0_host>;
+	status = "okay";
+};
+
+&usb_host0_ehci {
+	status = "okay";
+};
+
+&usb_host0_ohci {
+	status = "okay";
+};
+
+&vopb {
+	status = "okay";
+};
+
+&vopb_mmu {
+	status = "okay";
+};
+
+/* Touch: Silead GSL3676, firmware extracted from the stock kernel
+ * (firmware/silead/README.md). Stock: IRQ GPIO0_B3, reset GPIO3_C2.
+ */
+&i2c1 {
+	clock-frequency = <400000>;
+	i2c-scl-falling-time-ns = <16>;
+	i2c-scl-rising-time-ns = <275>;
+	status = "okay";
+
+	touchscreen@40 {
+		compatible = "silead,gsl3675";
+		reg = <0x40>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
+		power-gpios = <&gpio3 RK_PC2 GPIO_ACTIVE_HIGH>;
+		firmware-name = "gsl3676-frame157.fw";
+		/* Calibrated with on-screen targets at 10%/50%/90% (2026-10-16):
+		 * raw X runs right to left over 0-1784, raw Y bottom to top over
+		 * 0-1160. The stock driver's X/Y swap does not apply to mainline
+		 * silead.
+		 */
+		touchscreen-size-x = <1784>;
+		touchscreen-size-y = <1160>;
+		touchscreen-inverted-x;
+		touchscreen-inverted-y;
+		silead,max-fingers = <10>;
+	};
+
+};
+
+/* CPU/GPU temperature: enables the SoC thermal zones (passive throttling from
+ * 70 C). Hardware shutdown at 120 C resets through the CRU, as stock (mode 0).
+ */
+&tsadc {
+	rockchip,hw-tshut-mode = <0>;
+	status = "okay";
+};

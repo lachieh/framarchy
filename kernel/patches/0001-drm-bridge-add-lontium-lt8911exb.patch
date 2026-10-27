@@ -1,0 +1,590 @@
+diff --git a/drivers/gpu/drm/bridge/Kconfig b/drivers/gpu/drm/bridge/Kconfig
+index a250afd8d..6c7b6dae0 100644
+--- a/drivers/gpu/drm/bridge/Kconfig
++++ b/drivers/gpu/drm/bridge/Kconfig
+@@ -141,6 +141,16 @@ config DRM_LONTIUM_LT8912B
+ 	  Say M here if you want to support this hardware as a module.
+ 	  The module will be named "lontium-lt8912b".
+ 
++config DRM_LONTIUM_LT8911EXB
++	tristate "Lontium LT8911EXB DSI/eDP bridge"
++	depends on OF
++	select DRM_PANEL_BRIDGE
++	select DRM_KMS_HELPER
++	select DRM_MIPI_DSI
++	select REGMAP_I2C
++	help
++	  Driver for the Lontium LT8911EXB MIPI-DSI to eDP bridge.
++
+ config DRM_LONTIUM_LT9211
+ 	tristate "Lontium LT9211 DSI/LVDS/DPI bridge"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/bridge/Makefile b/drivers/gpu/drm/bridge/Makefile
+index c7dc03182..d545865a6 100644
+--- a/drivers/gpu/drm/bridge/Makefile
++++ b/drivers/gpu/drm/bridge/Makefile
+@@ -13,6 +13,7 @@ obj-$(CONFIG_DRM_I2C_NXP_TDA998X) += tda998x.o
+ obj-$(CONFIG_DRM_ITE_IT6263) += ite-it6263.o
+ obj-$(CONFIG_DRM_ITE_IT6505) += ite-it6505.o
+ obj-$(CONFIG_DRM_LONTIUM_LT8912B) += lontium-lt8912b.o
++obj-$(CONFIG_DRM_LONTIUM_LT8911EXB) += lontium-lt8911exb.o
+ obj-$(CONFIG_DRM_LONTIUM_LT9211) += lontium-lt9211.o
+ obj-$(CONFIG_DRM_LONTIUM_LT9611) += lontium-lt9611.o
+ obj-$(CONFIG_DRM_LONTIUM_LT9611UXC) += lontium-lt9611uxc.o
+diff --git a/drivers/gpu/drm/bridge/lontium-lt8911exb.c b/drivers/gpu/drm/bridge/lontium-lt8911exb.c
+new file mode 100644
+index 000000000..695ba8b91
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/lontium-lt8911exb.c
+@@ -0,0 +1,551 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Lontium LT8911EXB MIPI-DSI to eDP bridge driver
++ *
++ * The register sequences come from Lontium's reference driver (Topband,
++ * shenhaibo, v1.1.0, 2019). The chip must see DSI video before it is
++ * configured, so all setup happens in atomic_enable, after the DSI host
++ * bridge has started streaming.
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/media-bus-format.h>
++#include <linux/module.h>
++#include <linux/of_graph.h>
++#include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_bridge.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_of.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_print.h>
++
++#define REG_PAGE_CONTROL	0xff
++
++static bool test_pattern;
++module_param(test_pattern, bool, 0444);
++MODULE_PARM_DESC(test_pattern, "Show the bridge's built-in test pattern instead of the DSI input");
++
++struct lt8911exb {
++	struct drm_bridge	bridge;
++	struct device		*dev;
++	struct regmap		*regmap;
++	struct mipi_dsi_device	*dsi;
++	struct drm_bridge	*panel_bridge;
++	struct gpio_desc	*reset_gpio;
++	struct gpio_desc	*enable_gpio;
++	struct regulator	*vdd;
++	u32			edp_lanes;
++	bool			bpc6;
++	bool			test_pattern;
++};
++
++static const struct regmap_range_cfg lt8911exb_range = {
++	.name = "lt8911exb",
++	.range_min = 0x0000,
++	.range_max = 0xffff,
++	.selector_reg = REG_PAGE_CONTROL,
++	.selector_mask = 0xff,
++	.selector_shift = 0,
++	.window_start = 0,
++	.window_len = 0x100,
++};
++
++static const struct regmap_config lt8911exb_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.ranges = &lt8911exb_range,
++	.num_ranges = 1,
++	/* Several registers are FIFOs or self-clearing triggers. */
++	.cache_type = REGCACHE_NONE,
++	.max_register = 0xffff,
++};
++
++static struct lt8911exb *bridge_to_lt8911exb(struct drm_bridge *bridge)
++{
++	return container_of(bridge, struct lt8911exb, bridge);
++}
++
++static int lt8911exb_w(struct lt8911exb *ctx, unsigned int reg, unsigned int val)
++{
++	return regmap_write(ctx->regmap, reg, val);
++}
++
++static unsigned int lt8911exb_r(struct lt8911exb *ctx, unsigned int reg)
++{
++	unsigned int val = 0;
++
++	regmap_read(ctx->regmap, reg, &val);
++	return val;
++}
++
++static int lt8911exb_seq(struct lt8911exb *ctx, const struct reg_sequence *seq,
++			 int n)
++{
++	return regmap_multi_reg_write(ctx->regmap, seq, n);
++}
++
++static int lt8911exb_read_chipid(struct lt8911exb *ctx)
++{
++	u8 id[3];
++	int ret;
++
++	ret = lt8911exb_w(ctx, 0x8108, 0x7f);
++	if (ret)
++		return ret;
++	ret = regmap_bulk_read(ctx->regmap, 0x8100, id, sizeof(id));
++	if (ret)
++		return ret;
++
++	/* The reference driver reports 0xe00517 for this part. */
++	if (id[0] != 0x17 || id[1] != 0x05 || id[2] != 0xe0)
++		dev_warn(ctx->dev, "unexpected chip id %02x%02x%02x\n",
++			 id[2], id[1], id[0]);
++	return 0;
++}
++
++static void lt8911exb_dpcd_write(struct lt8911exb *ctx, u32 addr, u8 data)
++{
++	lt8911exb_w(ctx, 0xa62b, 0x80 | ((addr >> 16) & 0x0f));
++	lt8911exb_w(ctx, 0xa62b, (addr >> 8) & 0xff);
++	lt8911exb_w(ctx, 0xa62b, addr & 0xff);
++	lt8911exb_w(ctx, 0xa62b, 0x00);	/* length - 1 */
++	lt8911exb_w(ctx, 0xa62b, data);
++	lt8911exb_w(ctx, 0xa62c, 0x00);	/* start the AUX transfer */
++	msleep(20);
++	if ((lt8911exb_r(ctx, 0xa625) & 0x0f) != 0x0c)
++		dev_dbg(ctx->dev, "DPCD write %05x not acknowledged\n", addr);
++}
++
++static int lt8911exb_set_timing(struct lt8911exb *ctx,
++				const struct drm_display_mode *m)
++{
++	u16 hact = m->hdisplay, vact = m->vdisplay;
++	u16 htotal = m->htotal, vtotal = m->vtotal;
++	u16 hfp = m->hsync_start - m->hdisplay;
++	u16 hs = m->hsync_end - m->hsync_start;
++	u16 hbp = m->htotal - m->hsync_end;
++	u16 vfp = m->vsync_start - m->vdisplay;
++	u16 vs = m->vsync_end - m->vsync_start;
++	u16 vbp = m->vtotal - m->vsync_end;
++	const struct reg_sequence seq[] = {
++		/* MIPI RX timing */
++		{ 0xd00d, vtotal >> 8 }, { 0xd00e, vtotal & 0xff },
++		{ 0xd00f, vact >> 8 }, { 0xd010, vact & 0xff },
++		{ 0xd011, htotal >> 8 }, { 0xd012, htotal & 0xff },
++		{ 0xd013, hact >> 8 }, { 0xd014, hact & 0xff },
++		{ 0xd015, vs & 0xff }, { 0xd016, hs & 0xff },
++		{ 0xd017, vfp >> 8 }, { 0xd018, vfp & 0xff },
++		{ 0xd019, hfp >> 8 }, { 0xd01a, hfp & 0xff },
++		/* eDP main stream attributes, taken from registers */
++		{ 0xa82d, 0x88 },
++		{ 0xa805, htotal >> 8 }, { 0xa806, htotal & 0xff },
++		{ 0xa807, (hs + hbp) >> 8 }, { 0xa808, (hs + hbp) & 0xff },
++		{ 0xa809, hs >> 8 }, { 0xa80a, hs & 0xff },
++		{ 0xa80b, hact >> 8 }, { 0xa80c, hact & 0xff },
++		{ 0xa80d, vtotal >> 8 }, { 0xa80e, vtotal & 0xff },
++		{ 0xa811, (vs + vbp) >> 8 }, { 0xa812, (vs + vbp) & 0xff },
++		{ 0xa814, vs & 0xff },
++		{ 0xa815, vact >> 8 }, { 0xa816, vact & 0xff },
++	};
++
++	return lt8911exb_seq(ctx, seq, ARRAY_SIZE(seq));
++}
++
++static const struct reg_sequence lt8911exb_init_seq[] = {
++	{ 0x8149, 0xff },	/* enable page 0x87 */
++	{ 0x825a, 0x0e },	/* GPIO test output */
++	/* MIPI RX analog */
++	{ 0x8232, 0x51 }, { 0x8235, 0x42 }, { 0x824c, 0x0c }, { 0x824d, 0x00 },
++	{ 0x823a, 0x44 }, { 0x823b, 0x44 },
++	/* De-SSC / PCR PLL analog */
++	{ 0x826a, 0x40 }, { 0x826b, 0x40 },
++};
++
++static const struct reg_sequence lt8911exb_dessc_seq[] = {
++	/* De-SSC PLL digital */
++	{ 0x85a9, 0x31 }, { 0x85aa, 0x17 }, { 0x85ab, 0xba }, { 0x85ac, 0xe1 },
++	{ 0x85ad, 0x47 }, { 0x85ae, 0x01 }, { 0x85ae, 0x11 },
++	{ 0x85c0, 0x01 },	/* select MIPI RX */
++};
++
++static const struct reg_sequence lt8911exb_txpll_seq[] = {
++	/* TX PLL 2.7 GHz */
++	{ 0x8719, 0x31 },
++	{ 0x8202, 0x42 }, { 0x8203, 0x00 }, { 0x8203, 0x01 },
++	{ 0x8109, 0xfc }, { 0x8109, 0xfd },
++	{ 0x870c, 0x11 },
++};
++
++static const struct reg_sequence lt8911exb_txphy_seq[] = {
++	{ 0x8211, 0x00 }, { 0x8213, 0x10 }, { 0x8214, 0x0c }, { 0x8214, 0x08 },
++	{ 0x8213, 0x20 }, { 0x820e, 0x25 }, { 0x8212, 0xff },
++};
++
++static int lt8911exb_setup(struct lt8911exb *ctx, int lanes, u32 clock_khz)
++{
++	u32 pclk = clock_khz / 10;	/* reference driver works in 10 kHz */
++	u8 postdiv, pcr_m;
++	int i, ret;
++
++	ret = lt8911exb_seq(ctx, lt8911exb_init_seq,
++			    ARRAY_SIZE(lt8911exb_init_seq));
++	if (ret)
++		return ret;
++
++	if (pclk < 8800) {
++		lt8911exb_w(ctx, 0x826e, 0x82);	/* pre-div 2: 44-88 MHz */
++		postdiv = 0x08;
++	} else {
++		lt8911exb_w(ctx, 0x826e, 0x81);	/* pre-div 1: 88-176 MHz */
++		postdiv = 0x04;
++	}
++	pcr_m = pclk * postdiv / 25 / 100;
++
++	ret = lt8911exb_seq(ctx, lt8911exb_dessc_seq,
++			    ARRAY_SIZE(lt8911exb_dessc_seq));
++	if (ret)
++		return ret;
++	lt8911exb_w(ctx, 0x85b0, ctx->bpc6 ? 0xd0 : 0x00);	/* dither */
++
++	/* MIPI RX digital */
++	{
++		const struct reg_sequence rx[] = {
++			{ 0xd000, lanes % 4 },	/* 0 means 4 lanes */
++			{ 0xd002, 0x08 },	/* settle */
++			{ 0xd008, 0x00 }, { 0xd00a, 0x12 }, { 0xd00c, 0x40 },
++			{ 0xd01c, 0x3a }, { 0xd031, 0x0a },
++			{ 0xd03f, 0x10 }, { 0xd040, 0x20 }, { 0xd041, 0x30 },
++			{ 0xd026, ctx->test_pattern ? (pcr_m | 0x80) : pcr_m },
++			{ 0x8103, 0x7b }, { 0x8103, 0xff },	/* PCR reset */
++		};
++
++		ret = lt8911exb_seq(ctx, rx, ARRAY_SIZE(rx));
++		if (ret)
++			return ret;
++	}
++
++	ret = lt8911exb_seq(ctx, lt8911exb_txpll_seq,
++			    ARRAY_SIZE(lt8911exb_txpll_seq));
++	if (ret)
++		return ret;
++	for (i = 0; i < 5; i++) {
++		usleep_range(5000, 6000);
++		if (lt8911exb_r(ctx, 0x8737) & 0x02)
++			break;
++		lt8911exb_w(ctx, 0x8109, 0xfc);
++		lt8911exb_w(ctx, 0x8109, 0xfd);
++		lt8911exb_w(ctx, 0x870c, 0x10);
++		lt8911exb_w(ctx, 0x870c, 0x11);
++	}
++	if (i == 5)
++		dev_warn(ctx->dev, "TX PLL did not lock\n");
++
++	ret = lt8911exb_seq(ctx, lt8911exb_txphy_seq,
++			    ARRAY_SIZE(lt8911exb_txphy_seq));
++	if (ret)
++		return ret;
++
++	/* eDP TX digital */
++	if (ctx->test_pattern) {
++		lt8911exb_w(ctx, 0xa824, 0x50);
++		lt8911exb_w(ctx, 0xa825, 0x70);
++		lt8911exb_w(ctx, 0xa827, 0x50);
++	} else {
++		lt8911exb_w(ctx, 0xa827, 0x10);
++	}
++	lt8911exb_w(ctx, 0xa817, ctx->bpc6 ? 0x00 : 0x10);
++	lt8911exb_w(ctx, 0xa818, ctx->bpc6 ? 0x00 : 0x20);
++	lt8911exb_w(ctx, 0xa000, 0x08);
++	return lt8911exb_w(ctx, 0xa001, 0x00);
++}
++
++static void lt8911exb_video_check(struct lt8911exb *ctx)
++{
++	u32 byteclk = 0;
++
++	lt8911exb_w(ctx, 0x851d, 0x00);	/* frequency meter on byte clock */
++	lt8911exb_w(ctx, 0x8540, 0xf7);
++	lt8911exb_w(ctx, 0x8541, 0x30);
++	lt8911exb_w(ctx, 0x85a1, 0x82);
++	lt8911exb_w(ctx, 0x8109, 0x7d);	/* video check reset */
++	lt8911exb_w(ctx, 0x8109, 0xfd);
++	msleep(30);
++
++	if (lt8911exb_r(ctx, 0x8550) == 0x03)
++		byteclk = (lt8911exb_r(ctx, 0x854d) << 16) |
++			  (lt8911exb_r(ctx, 0x854e) << 8) |
++			  lt8911exb_r(ctx, 0x854f);
++
++	dev_info(ctx->dev,
++		 "DSI input: byte clock %u kHz, vtotal %u, hact %u, vact %u\n",
++		 byteclk,
++		 (lt8911exb_r(ctx, 0x8576) << 8) | lt8911exb_r(ctx, 0x8577),
++		 ((lt8911exb_r(ctx, 0xd082) << 8) | lt8911exb_r(ctx, 0xd083)) / 3,
++		 (lt8911exb_r(ctx, 0xd085) << 8) | lt8911exb_r(ctx, 0xd086));
++}
++
++static void lt8911exb_link_train(struct lt8911exb *ctx)
++{
++	lt8911exb_w(ctx, 0x85a1, 0x82);	/* eDP scramble mode */
++	lt8911exb_w(ctx, 0xac00, 0x20);	/* soft link training */
++	lt8911exb_w(ctx, 0xa62a, 0x01);
++
++	lt8911exb_dpcd_write(ctx, 0x010a, 0x01);
++	msleep(10);
++	lt8911exb_dpcd_write(ctx, 0x0102, 0x00);
++	msleep(10);
++	lt8911exb_dpcd_write(ctx, 0x010a, 0x01);
++	msleep(200);
++
++	lt8911exb_w(ctx, 0xac00, 0x60);
++	lt8911exb_w(ctx, 0xa62a, 0x00);
++	lt8911exb_w(ctx, 0x8107, 0xfe);
++	lt8911exb_w(ctx, 0x8107, 0xff);
++	lt8911exb_w(ctx, 0x810a, 0xfc);
++	lt8911exb_w(ctx, 0x810a, 0xfe);
++
++	lt8911exb_w(ctx, 0x851a, ctx->edp_lanes);
++	lt8911exb_w(ctx, 0xac00, 0x64);
++	lt8911exb_w(ctx, 0xac01, 0x0a);
++	lt8911exb_w(ctx, 0xac0c, 0x85);
++	lt8911exb_w(ctx, 0xac0c, 0xc5);
++}
++
++static int lt8911exb_attach(struct drm_bridge *bridge,
++			    struct drm_encoder *encoder,
++			    enum drm_bridge_attach_flags flags)
++{
++	struct lt8911exb *ctx = bridge_to_lt8911exb(bridge);
++
++	return drm_bridge_attach(encoder, ctx->panel_bridge, bridge, flags);
++}
++
++static void lt8911exb_atomic_pre_enable(struct drm_bridge *bridge,
++					struct drm_atomic_state *state)
++{
++	struct lt8911exb *ctx = bridge_to_lt8911exb(bridge);
++	int ret;
++
++	ret = regulator_enable(ctx->vdd);
++	if (ret) {
++		dev_err(ctx->dev, "failed to enable vdd: %d\n", ret);
++		return;
++	}
++	gpiod_set_value_cansleep(ctx->enable_gpio, 1);
++
++	/* Reference timing: reset held 100 ms, then 100 ms before access. */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	msleep(100);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	msleep(100);
++}
++
++static void lt8911exb_atomic_enable(struct drm_bridge *bridge,
++				    struct drm_atomic_state *state)
++{
++	struct lt8911exb *ctx = bridge_to_lt8911exb(bridge);
++	const struct drm_crtc_state *crtc_state;
++	const struct drm_display_mode *mode;
++	struct drm_connector *connector;
++	int ret;
++
++	connector = drm_atomic_get_new_connector_for_encoder(state,
++							     bridge->encoder);
++	crtc_state = drm_atomic_get_new_crtc_state(state,
++		drm_atomic_get_new_connector_state(state, connector)->crtc);
++	mode = &crtc_state->adjusted_mode;
++
++	ret = lt8911exb_read_chipid(ctx);
++	if (ret) {
++		dev_err(ctx->dev, "chip not responding: %d\n", ret);
++		return;
++	}
++
++	ret = lt8911exb_set_timing(ctx, mode);
++	if (!ret)
++		ret = lt8911exb_setup(ctx, ctx->dsi->lanes, mode->clock);
++	if (ret) {
++		dev_err(ctx->dev, "configuration failed: %d\n", ret);
++		return;
++	}
++
++	lt8911exb_video_check(ctx);
++	lt8911exb_link_train(ctx);
++}
++
++static void lt8911exb_atomic_post_disable(struct drm_bridge *bridge,
++					  struct drm_atomic_state *state)
++{
++	struct lt8911exb *ctx = bridge_to_lt8911exb(bridge);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
++	regulator_disable(ctx->vdd);
++}
++
++static enum drm_mode_status
++lt8911exb_mode_valid(struct drm_bridge *bridge,
++		     const struct drm_display_info *info,
++		     const struct drm_display_mode *mode)
++{
++	/* The PCR PLL dividers in the reference driver cover 44-176 MHz. */
++	if (mode->clock < 44000)
++		return MODE_CLOCK_LOW;
++	if (mode->clock > 176000)
++		return MODE_CLOCK_HIGH;
++	return MODE_OK;
++}
++
++static u32 *
++lt8911exb_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
++				    struct drm_bridge_state *bridge_state,
++				    struct drm_crtc_state *crtc_state,
++				    struct drm_connector_state *conn_state,
++				    u32 output_fmt, unsigned int *num_input_fmts)
++{
++	u32 *fmts = kzalloc(sizeof(*fmts), GFP_KERNEL);
++
++	*num_input_fmts = fmts ? 1 : 0;
++	if (fmts)
++		fmts[0] = MEDIA_BUS_FMT_RGB888_1X24;
++	return fmts;
++}
++
++static const struct drm_bridge_funcs lt8911exb_funcs = {
++	.attach			= lt8911exb_attach,
++	.mode_valid		= lt8911exb_mode_valid,
++	.atomic_pre_enable	= lt8911exb_atomic_pre_enable,
++	.atomic_enable		= lt8911exb_atomic_enable,
++	.atomic_post_disable	= lt8911exb_atomic_post_disable,
++	.atomic_duplicate_state	= drm_atomic_helper_bridge_duplicate_state,
++	.atomic_destroy_state	= drm_atomic_helper_bridge_destroy_state,
++	.atomic_reset		= drm_atomic_helper_bridge_reset,
++	.atomic_get_input_bus_fmts = lt8911exb_atomic_get_input_bus_fmts,
++};
++
++static int lt8911exb_host_attach(struct lt8911exb *ctx)
++{
++	const struct mipi_dsi_device_info info = {
++		.type = "lt8911exb",
++		.channel = 0,
++	};
++	struct device *dev = ctx->dev;
++	struct device_node *endpoint, *host_node;
++	struct mipi_dsi_device *dsi;
++	struct mipi_dsi_host *host;
++	int lanes;
++
++	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, 0, -1);
++	lanes = drm_of_get_data_lanes_count(endpoint, 1, 4);
++	host_node = of_graph_get_remote_port_parent(endpoint);
++	host = of_find_mipi_dsi_host_by_node(host_node);
++	of_node_put(host_node);
++	of_node_put(endpoint);
++
++	if (!host)
++		return -EPROBE_DEFER;
++	if (lanes < 0)
++		lanes = 4;
++
++	dsi = devm_mipi_dsi_device_register_full(dev, host, &info);
++	if (IS_ERR(dsi))
++		return dev_err_probe(dev, PTR_ERR(dsi),
++				     "failed to create DSI device\n");
++
++	/* The chip wants non-burst video with sync events and a continuous clock. */
++	dsi->lanes = lanes;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	/* As the stock panel node (dsi,flags = 0x803): burst video, LP commands. */
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
++			  MIPI_DSI_MODE_LPM;
++	ctx->dsi = dsi;
++
++	return devm_mipi_dsi_attach(dev, dsi);
++}
++
++static int lt8911exb_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct lt8911exb *ctx;
++	int ret;
++
++	ctx = devm_drm_bridge_alloc(dev, struct lt8911exb, bridge,
++				    &lt8911exb_funcs);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++	ctx->dev = dev;
++
++	ctx->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return PTR_ERR(ctx->reset_gpio);
++	ctx->enable_gpio = devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_LOW);
++	if (IS_ERR(ctx->enable_gpio))
++		return PTR_ERR(ctx->enable_gpio);
++	ctx->vdd = devm_regulator_get(dev, "vdd");
++	if (IS_ERR(ctx->vdd))
++		return PTR_ERR(ctx->vdd);
++
++	ctx->edp_lanes = 2;
++	of_property_read_u32(dev->of_node, "lontium,edp-lanes", &ctx->edp_lanes);
++	ctx->bpc6 = of_property_read_bool(dev->of_node, "lontium,6bpc");
++	ctx->test_pattern = test_pattern ||
++			    of_property_read_bool(dev->of_node,
++						  "lontium,test-pattern");
++
++	ctx->panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
++	if (IS_ERR(ctx->panel_bridge))
++		return dev_err_probe(dev, PTR_ERR(ctx->panel_bridge),
++				     "no panel on port 1\n");
++
++	ctx->regmap = devm_regmap_init_i2c(client, &lt8911exb_regmap_config);
++	if (IS_ERR(ctx->regmap))
++		return PTR_ERR(ctx->regmap);
++
++	i2c_set_clientdata(client, ctx);
++	ctx->bridge.of_node = dev->of_node;
++	ctx->bridge.type = DRM_MODE_CONNECTOR_eDP;
++	drm_bridge_add(&ctx->bridge);
++
++	ret = lt8911exb_host_attach(ctx);
++	if (ret)
++		drm_bridge_remove(&ctx->bridge);
++	return ret;
++}
++
++static void lt8911exb_remove(struct i2c_client *client)
++{
++	struct lt8911exb *ctx = i2c_get_clientdata(client);
++
++	drm_bridge_remove(&ctx->bridge);
++}
++
++static const struct i2c_device_id lt8911exb_id[] = {
++	{ "lt8911exb" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, lt8911exb_id);
++
++static const struct of_device_id lt8911exb_match[] = {
++	{ .compatible = "lontium,lt8911exb" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, lt8911exb_match);
++
++static struct i2c_driver lt8911exb_driver = {
++	.probe = lt8911exb_probe,
++	.remove = lt8911exb_remove,
++	.id_table = lt8911exb_id,
++	.driver = {
++		.name = "lt8911exb",
++		.of_match_table = lt8911exb_match,
++	},
++};
++module_i2c_driver(lt8911exb_driver);
++
++MODULE_DESCRIPTION("Lontium LT8911EXB MIPI-DSI to eDP bridge driver");
++MODULE_LICENSE("GPL");

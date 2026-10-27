@@ -1,0 +1,14 @@
+# USB network to the host. A fixed link-local address (169.254.157.157) so the
+# Mac always finds the frame, plus IPv4LL and mDNS (frame157.local).
+# Not required for "online": with the cable unplugged, usb0 would otherwise
+# keep networkd offline, and systemd-timesyncd never syncs the clock.
+[Match]
+Name=usb0
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+Address=169.254.157.157/16
+LinkLocalAddressing=yes
+MulticastDNS=yes

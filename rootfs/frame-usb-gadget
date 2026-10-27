@@ -1,0 +1,22 @@
+#!/bin/sh
+# USB device-mode gadget on the frame's USB-C port: an ACM serial console
+# (getty on ttyGS0) and a CDC-NCM network link (usb0, SSH). Same IDs as the
+# first-boot initramfs, so the host sees the same "FRAME157" device.
+set -eu
+g=/sys/kernel/config/usb_gadget/frame157
+[ -d /sys/kernel/config/usb_gadget ] || mount -t configfs configfs /sys/kernel/config
+[ -d $g ] && exit 0
+udc=$(ls /sys/class/udc | head -n1)
+mkdir $g && cd $g
+echo 0x2211 > idVendor
+echo 0x0012 > idProduct
+mkdir strings/0x409
+echo rockchip > strings/0x409/manufacturer
+echo FRAME157 > strings/0x409/product
+echo FRAME157-LINUX > strings/0x409/serialnumber
+mkdir configs/c.1 configs/c.1/strings/0x409
+echo "ACM console + NCM network" > configs/c.1/strings/0x409/configuration
+mkdir functions/acm.usb0 functions/ncm.usb0
+ln -s functions/acm.usb0 configs/c.1/
+ln -s functions/ncm.usb0 configs/c.1/
+echo "$udc" > UDC
