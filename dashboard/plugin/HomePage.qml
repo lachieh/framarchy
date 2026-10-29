@@ -210,9 +210,12 @@ RowLayout {
         }
 
         Flow {
+          id: scenes
           width: parent.width
           spacing: Style.spacing.sm
           visible: page.room !== null && page.room.scene !== null
+          // Rows that would run past the card are hidden; layout keeps them so earlier rows don't move.
+          readonly property real room: parent.height - y
           Repeater {
             // Hue rooms carry a dozen scenes; offer the everyday ones first.
             model: {
@@ -224,6 +227,9 @@ RowLayout {
             ActionButton {
               required property string modelData
               label: modelData
+              readonly property bool fits: y + height <= scenes.room
+              opacity: fits ? 1 : 0
+              enabled: fits
               selected: page.room.on > 0 && page.room.scene.current === modelData
               onActivated: s.call("select/select_option", { entity_id: page.room.scene.entity, option: modelData })
             }

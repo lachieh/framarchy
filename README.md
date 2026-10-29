@@ -11,6 +11,20 @@ been verified on hardware. Android package and power settings have been changed
 over ADB; no replacement OS or boot image has been flashed. See the
 [operations log](docs/operations.md) for changes and recovery commands.
 
+## Dashboard
+
+The frame runs a touch home dashboard as an Omarchy shell plugin: weather,
+Home Assistant lights and climate on a 3D floor plan, the car, and appliances.
+See [dashboard/README.md](dashboard/README.md) and
+[docs/dashboard.md](docs/dashboard.md).
+
+| | |
+| --- | --- |
+| ![Today: clock, weather, shopping list and room lights](docs/img/dashboard-today.png) | ![Home: 3D floor plan, air conditioning and room scenes](docs/img/dashboard-home.png) |
+| ![Car: battery, charging and controls](docs/img/dashboard-car.png) | ![Devices: washer, dryer, doors, leak sensor and vacuum](docs/img/dashboard-devices.png) |
+
+Screenshots from the frame in demo mode, with an altered floor plan.
+
 ## Layout
 
 | Path | What |
@@ -27,6 +41,7 @@ over ADB; no replacement OS or boot image has been flashed. See the
 | [scripts/build-kernel.sh](scripts/build-kernel.sh) | Builds the mainline kernel + DTBs in Docker |
 | [kernel/](kernel/) | Kernel config fragment, patches (LT8911EXB driver), board DTS |
 | [port/](port/) | Omarchy installer for the frame (pinned commit, low-RAM settings, touch keyboard) |
+| [dashboard/](dashboard/) | Home dashboard plugin for the Omarchy shell |
 | `backup/`, `build/` | Local only (gitignored): firmware backup, sources, build output |
 
 ## Requirements

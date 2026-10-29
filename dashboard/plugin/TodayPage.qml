@@ -90,9 +90,12 @@ ColumnLayout {
         }
       }
 
-      // Home at a glance; each line opens its page.
+      // Home at a glance (each line opens its page), then out-the-door hints:
+      // as many whole rows as fit under the clock, glance rows first.
       Column {
-        anchors { left: parent.left; right: parent.right; top: clockColumn.bottom; topMargin: Style.spacing.lg }
+        id: details
+        anchors { left: parent.left; right: parent.right; top: clockColumn.bottom; bottom: parent.bottom; topMargin: Style.spacing.sm }
+        clip: true
         Repeater {
           model: {
             var h = s.home, out = []
@@ -105,14 +108,16 @@ ColumnLayout {
             var open = h.devices.filter(function(d) { return d.tone === "attention" || d.tone === "alert" })
             out.push({ icon: open.length ? Model.ICON.warning : Model.ICON.check, lit: open.length > 0,
               text: open.length ? open.map(function(d) { return d.name + " " + d.state.toLowerCase() }).join(", ") : "All closed and dry", page: "devices" })
-            return out
+            var advice = s.weather ? Model.advice(s.weather, s.config.units).slice(0, 2) : []
+            advice.forEach(function(a) { out.push({ icon: a.icon, lit: true, text: a.text, page: "" }) })
+            return out.slice(0, Math.max(0, Math.floor(details.height / Style.spacing.popupRowHeight)))
           }
           Rectangle {
             required property var modelData
             width: parent.width
             height: Style.spacing.popupRowHeight
             radius: Style.cornerRadius
-            color: glanceTap.pressed ? Style.pressedFill : "transparent"
+            color: rowTap.pressed ? Style.pressedFill : "transparent"
             Row {
               anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter }
               spacing: Style.spacing.controlGap
@@ -120,29 +125,14 @@ ColumnLayout {
               PlainText { width: parent.width - Style.font.iconLarge - parent.spacing; elide: Text.ElideRight; text: modelData.text; font.pixelSize: Style.font.bodySmall }
             }
             MouseArea {
-              id: glanceTap
+              id: rowTap
               anchors.fill: parent
+              enabled: modelData.page !== ""
               onClicked: {
                 var spaces = s.config.spaces
                 for (var i = 0; i < spaces.length; i++) if (spaces[i].page === modelData.page) s.goToSpace(spaces[i].workspace)
               }
             }
-          }
-        }
-      }
-
-      // Out-the-door hints.
-      Column {
-        id: adviceColumn
-        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-        spacing: Style.spacing.sm
-        Repeater {
-          model: s.weather ? Model.advice(s.weather, s.config.units).slice(0, 2) : []
-          Row {
-            required property var modelData
-            spacing: Style.spacing.controlGap
-            Glyph { width: Style.font.iconLarge; text: modelData.icon; size: Style.font.iconSmall; color: s.accent }
-            PlainText { width: adviceColumn.width - Style.font.iconLarge - parent.spacing; wrapMode: Text.WordWrap; text: modelData.text; font.pixelSize: Style.font.bodySmall }
           }
         }
       }
